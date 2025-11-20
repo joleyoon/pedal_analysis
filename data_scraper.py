@@ -5,6 +5,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from bs4 import BeautifulSoup
+import requests
 import json
 import time
 
@@ -76,20 +78,49 @@ class GearSearchScraper:
             links.append(link.get_attribute("href"))
 
         return links
+    
+    def gather_data_from_post(self, link):
+        """Takes link as input and gathers the information from that post and format into json"""
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+            )
+        }
+        response = requests.get(link, headers=headers, timeout=self.timeout * 5)
+        response.raise_for_status()
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        first_post = soup.select_one("article.message")
+        title_elem = soup.select_one("h1.p-title-value")
+        author_elem = first_post.select_one("a.username") if first_post else None
+        time_elem = first_post.select_one("time.u-dt") if first_post else None
+        body_elem = first_post.select_one(".bbWrapper") if first_post else None
+
+        return {
+            "url": link,
+            "title": title_elem.get_text(strip=True) if title_elem else None,
+            "author": author_elem.get_text(strip=True) if author_elem else None,
+            "posted_on": time_elem.get("datetime") if time_elem else None,
+            "content": body_elem.get_text("\n", strip=True) if body_elem else None,
+        }
+        return
 
 
 if __name__ == "__main__":
-    # gear = input("Enter the gear you want to search for: ").strip()
-    gear = "prs silver sky"
-    if not gear:
-        raise SystemExit("Gear search query cannot be empty.")
+    # # gear = input("Enter the gear you want to search for: ").strip()
+    # gear = "prs silver sky"
+    # if not gear:
+    #     raise SystemExit("Gear search query cannot be empty.")
 
-    scraper = GearSearchScraper(gear_query=gear, headless=False)
-    export_list = scraper.perform_search()
+    # scraper = GearSearchScraper(gear_query=gear, headless=False)
+    # export_list = scraper.perform_search()
 
-    with open("something.json", 'w', encoding="utf-8") as f:
-        json.dump(export_list, f)
-        print("done")
+    # with open("something.json", 'w', encoding="utf-8") as f:
+    #     json.dump(export_list, f)
+    #     print("done")
+
+    link = 'https://www.thegearpage.net/board/index.php?threads/2025-prs-silver-sky-tungsten.2713931/'
 
     # driver = webdriver.Chrome()
     # driver.get("https://www.thegearpage.net/board/index.php?search/17466115/&q=prs+silver+sky&o=relevance")
