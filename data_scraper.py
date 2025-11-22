@@ -9,10 +9,17 @@ from bs4 import BeautifulSoup
 import requests
 import json
 import time
+import re
 
 
 class GearSearchScraper:
     SEARCH_URL = "https://www.thegearpage.net/board/index.php?search/&type=post"
+    DEFAULT_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        )
+    }
 
     def __init__(self, gear_query: str, *, headless: bool = False, timeout: int = 5) -> None:
         self.gear_query = gear_query
@@ -81,13 +88,7 @@ class GearSearchScraper:
     
     def gather_data_from_post(self, link):
         """Takes link as input and gathers the information from that post and format into json"""
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-            )
-        }
-        response = requests.get(link, headers=headers, timeout=self.timeout * 5)
+        response = requests.get(link, headers=self.DEFAULT_HEADERS, timeout=self.timeout * 5)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -106,33 +107,94 @@ class GearSearchScraper:
         }
         return
 
+    @classmethod
+    def fetch_post_markup(cls, url: str, *, timeout: int = 30) -> tuple[str, str]:
+        """Return the markup body and the source type ('html' or 'snapshot')."""
+
+        response = requests.get(url, headers=cls.DEFAULT_HEADERS, timeout=timeout)
+        try:
+            response.raise_for_status()
+            return response.text, "html"
+        except requests.HTTPError as exc:
+            if exc.response is None or exc.response.status_code != 406:
+                raise
+
+        fallback_url = f"https://r.jina.ai/{requests.utils.requote_uri(url)}"
+        fallback_response = requests.get(fallback_url, timeout=timeout * 2)
+        fallback_response.raise_for_status()
+        return fallback_response.text, "snapshot"
+
+    @staticmethod
+    def parse_snapshot(url: str, text_snapshot: str) -> dict:
+        """Parse the plaintext snapshot served by r.jina.ai if the site blocks us."""
+
+        payload = {"url": url, "title": None, "author": None, "posted_on": None, "content": None}
+        lines = [line.strip() for line in text_snapshot.splitlines()]
+
+        for line in lines:
+            if line.startswith("Title:"):
+                payload["title"] = line.split("Title:", 1)[1].strip() or None
+                break
+
+        for line in lines:
+            if line.startswith("Published Time:"):
+                payload["posted_on"] = line.split("Published Time:", 1)[1].strip() or None
+                break
+
+        author_block_index = None
+        for idx, line in enumerate(lines):
+            if line.startswith("#### ["):
+                match = re.search(r"\[(.*?)\]", line)
+                if match:
+                    payload["author"] = match.group(1).strip()
+                author_block_index = idx
+                break
+
+        if author_block_index is not None:
+            content_start = None
+            for idx in range(author_block_index, len(lines)):
+                if "[#1]" in lines[idx]:
+                    content_start = idx + 2
+                    break
+            if content_start is None:
+                content_start = author_block_index
+
+            content_end = len(lines)
+            for idx in range(content_start, len(lines)):
+                if idx == content_start:
+                    continue
+                if lines[idx].startswith("#### ["):
+                    content_end = idx
+                    break
+                if lines[idx].startswith("Share:"):
+                    content_end = idx
+                    break
+
+            payload["content"] = "\n".join(lines[content_start:content_end]).strip() or None
+
+        return payload
+
 
 if __name__ == "__main__":
-    # # gear = input("Enter the gear you want to search for: ").strip()
-    # gear = "prs silver sky"
-    # if not gear:
-    #     raise SystemExit("Gear search query cannot be empty.")
+    target_link = "https://www.thegearpage.net/board/index.php?threads/2025-prs-silver-sky-tungsten.2713931/"
 
-    # scraper = GearSearchScraper(gear_query=gear, headless=False)
-    # export_list = scraper.perform_search()
+    markup, source_type = GearSearchScraper.fetch_post_markup(target_link)
+    if source_type == "html":
+        soup = BeautifulSoup(markup, "html.parser")
+        first_post = soup.select_one("article.message")
+        title_elem = soup.select_one("h1.p-title-value")
+        author_elem = first_post.select_one("a.username") if first_post else None
+        time_elem = first_post.select_one("time.u-dt") if first_post else None
+        body_elem = first_post.select_one(".bbWrapper") if first_post else None
 
-    # with open("something.json", 'w', encoding="utf-8") as f:
-    #     json.dump(export_list, f)
-    #     print("done")
+        post_payload = {
+            "url": target_link,
+            "title": title_elem.get_text(strip=True) if title_elem else None,
+            "author": author_elem.get_text(strip=True) if author_elem else None,
+            "posted_on": time_elem.get("datetime") if time_elem else None,
+            "content": body_elem.get_text("\n", strip=True) if body_elem else None,
+        }
+    else:
+        post_payload = GearSearchScraper.parse_snapshot(target_link, markup)
 
-    link = 'https://www.thegearpage.net/board/index.php?threads/2025-prs-silver-sky-tungsten.2713931/'
-
-    # driver = webdriver.Chrome()
-    # driver.get("https://www.thegearpage.net/board/index.php?search/17466115/&q=prs+silver+sky&o=relevance")
-
-    # contentRow = WebDriverWait(driver, 1).until(EC.presence_of_element_located((By.CLASS_NAME, "block-container")))
-    # all_links = contentRow.find_elements(By.TAG_NAME, "a")
-
-    # links = []
-    # for link in all_links:
-    #     links.append(link.get_attribute("href"))
-
-    # print(len(links))
-
-    while True:
-        pass
+    print(json.dumps(post_payload, indent=2))
